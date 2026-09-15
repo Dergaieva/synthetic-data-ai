@@ -66,3 +66,8 @@ def test_parser_rejects_circular_dependencies() -> None:
 
     with pytest.raises(DDLParseError, match="Circular"):
         DDLParser().parse(ddl)
+
+
+def test_parser_rejects_identifiers_that_are_unsafe_for_dynamic_tables() -> None:
+    with pytest.raises(DDLParseError, match="Unsupported table identifier"):
+        DDLParser().parse('CREATE TABLE "unsafe-name" (id INTEGER PRIMARY KEY);')
