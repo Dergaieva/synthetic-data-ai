@@ -13,13 +13,23 @@ from synthetic_data_ai.application.planning import (
     build_planning_prompt,
     validate_plan_for_schema,
 )
+from synthetic_data_ai.application.querying import (
+    QueryPlanValidationError,
+    build_query_prompt,
+    validate_query_plan,
+)
 from synthetic_data_ai.config import Settings
 from synthetic_data_ai.domain.generation import GenerationPlan
+from synthetic_data_ai.domain.query import QueryPlan
 from synthetic_data_ai.domain.schema import RelationalSchema
 
 
 class GeminiPlanningError(RuntimeError):
     """Raised when Vertex AI cannot produce a valid generation plan."""
+
+
+class GeminiQueryError(RuntimeError):
+    """Raised when Vertex AI cannot produce a valid analytical query plan."""
 
 
 class VertexGenerationPlanner:
@@ -82,3 +92,48 @@ class VertexGenerationPlanner:
         if not isinstance(text, str) or not text.strip():
             raise ValueError("Gemini response did not contain a plan")
         return GenerationPlan.model_validate_json(text)
+
+
+class VertexQueryPlanner:
+    """Translate a natural-language question into a guarded QueryPlan."""
+
+    def __init__(self, settings: Settings, client: Any | None = None) -> None:
+        self._settings = settings
+        self._client = client or genai.Client(
+            vertexai=settings.use_vertex_ai,
+            project=settings.google_cloud_project,
+            location=settings.google_cloud_location,
+        )
+
+    def create_plan(self, schema: RelationalSchema, question: str) -> QueryPlan:
+        """Generate and validate analytical intent without accepting SQL."""
+
+        try:
+            response = self._client.models.generate_content(
+                model=self._settings.gemini_model,
+                contents=build_query_prompt(schema, question),
+                config=types.GenerateContentConfig(
+                    temperature=0,
+                    response_mime_type="application/json",
+                    response_schema=QueryPlan,
+                ),
+            )
+            plan = self._parse_response(response)
+            return validate_query_plan(schema, plan)
+        except (ValidationError, QueryPlanValidationError, ValueError, TypeError) as error:
+            raise GeminiQueryError(f"Gemini returned an invalid query plan: {error}") from error
+        except Exception as error:
+            raise GeminiQueryError(
+                "Vertex AI query planning failed. Check GCP authentication and project access."
+            ) from error
+
+    def _parse_response(self, response: Any) -> QueryPlan:
+        parsed = getattr(response, "parsed", None)
+        if isinstance(parsed, QueryPlan):
+            return parsed
+        if parsed is not None:
+            return QueryPlan.model_validate(parsed)
+        text = getattr(response, "text", None)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError("Gemini response did not contain a query plan")
+        return QueryPlan.model_validate_json(text)

@@ -25,6 +25,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "mypy>=1.13,<2",
+  "pandas-stubs>=2.2,<3",
   "pytest>=8.3,<10",
   "pytest-cov>=6,<8",
   "ruff>=0.8,<1",
@@ -55,4 +56,3 @@ indent-style = "space"
 python_version = "3.12"
 strict = true
 packages = ["synthetic_data_ai"]
-
