@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 
 import sqlglot
@@ -56,6 +57,7 @@ class DDLParser:
             raise DDLParseError("CREATE TABLE must include an explicit column list")
 
         table_name = schema_expression.this.name
+        self._validate_identifier(table_name, "table")
         columns = [
             self._parse_column(item)
             for item in schema_expression.expressions
@@ -99,6 +101,7 @@ class DDLParser:
         )
 
     def _parse_column(self, definition: exp.ColumnDef) -> ColumnDefinition:
+        self._validate_identifier(definition.name, "column")
         data_type = definition.args.get("kind")
         if not isinstance(data_type, exp.DataType):
             raise DDLParseError(f"Column {definition.name!r} has no supported data type")
@@ -242,3 +245,10 @@ class DDLParser:
             if literal is not None and not literal.is_string:
                 values.append(int(literal.this))
         return tuple(values)
+
+    def _validate_identifier(self, identifier: str, kind: str) -> None:
+        if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier):
+            raise DDLParseError(
+                f"Unsupported {kind} identifier {identifier!r}; "
+                "use letters, digits, and underscores"
+            )
