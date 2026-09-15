@@ -22,6 +22,7 @@ from synthetic_data_ai.config import Settings
 from synthetic_data_ai.domain.generation import GenerationPlan
 from synthetic_data_ai.domain.query import QueryPlan
 from synthetic_data_ai.domain.schema import RelationalSchema
+from synthetic_data_ai.infrastructure.observability import AITracer, build_ai_tracer
 
 
 class GeminiPlanningError(RuntimeError):
@@ -35,8 +36,14 @@ class GeminiQueryError(RuntimeError):
 class VertexGenerationPlanner:
     """Request a constrained GenerationPlan from Gemini through Vertex AI."""
 
-    def __init__(self, settings: Settings, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any | None = None,
+        tracer: AITracer | None = None,
+    ) -> None:
         self._settings = settings
+        self._tracer = tracer or build_ai_tracer(settings)
         self._client = client or genai.Client(
             vertexai=settings.use_vertex_ai,
             project=settings.google_cloud_project,
@@ -60,17 +67,24 @@ class VertexGenerationPlanner:
             seed=seed,
         )
         try:
-            response = self._client.models.generate_content(
+            with self._tracer.generation(
+                name="create-generation-plan",
+                prompt=prompt,
                 model=self._settings.gemini_model,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.1,
-                    response_mime_type="application/json",
-                    response_schema=GenerationPlan,
-                ),
-            )
-            plan = self._parse_response(response)
-            return validate_plan_for_schema(schema, plan)
+                metadata={"table_count": len(schema.tables), "default_rows": default_rows},
+            ) as observation:
+                response = self._client.models.generate_content(
+                    model=self._settings.gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0.1,
+                        response_mime_type="application/json",
+                        response_schema=GenerationPlan,
+                    ),
+                )
+                plan = validate_plan_for_schema(schema, self._parse_response(response))
+                observation.update(output=plan.model_dump(mode="json"))
+                return plan
         except (ValidationError, PlanValidationError, ValueError, TypeError) as error:
             raise GeminiPlanningError(
                 f"Gemini returned an invalid generation plan: {error}"
@@ -97,8 +111,14 @@ class VertexGenerationPlanner:
 class VertexQueryPlanner:
     """Translate a natural-language question into a guarded QueryPlan."""
 
-    def __init__(self, settings: Settings, client: Any | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        client: Any | None = None,
+        tracer: AITracer | None = None,
+    ) -> None:
         self._settings = settings
+        self._tracer = tracer or build_ai_tracer(settings)
         self._client = client or genai.Client(
             vertexai=settings.use_vertex_ai,
             project=settings.google_cloud_project,
@@ -108,18 +128,26 @@ class VertexQueryPlanner:
     def create_plan(self, schema: RelationalSchema, question: str) -> QueryPlan:
         """Generate and validate analytical intent without accepting SQL."""
 
+        prompt = build_query_prompt(schema, question)
         try:
-            response = self._client.models.generate_content(
+            with self._tracer.generation(
+                name="create-query-plan",
+                prompt=prompt,
                 model=self._settings.gemini_model,
-                contents=build_query_prompt(schema, question),
-                config=types.GenerateContentConfig(
-                    temperature=0,
-                    response_mime_type="application/json",
-                    response_schema=QueryPlan,
-                ),
-            )
-            plan = self._parse_response(response)
-            return validate_query_plan(schema, plan)
+                metadata={"table_count": len(schema.tables)},
+            ) as observation:
+                response = self._client.models.generate_content(
+                    model=self._settings.gemini_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        temperature=0,
+                        response_mime_type="application/json",
+                        response_schema=QueryPlan,
+                    ),
+                )
+                plan = validate_query_plan(schema, self._parse_response(response))
+                observation.update(output=plan.model_dump(mode="json"))
+                return plan
         except (ValidationError, QueryPlanValidationError, ValueError, TypeError) as error:
             raise GeminiQueryError(f"Gemini returned an invalid query plan: {error}") from error
         except Exception as error:
