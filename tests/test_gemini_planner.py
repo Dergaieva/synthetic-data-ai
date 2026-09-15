@@ -8,7 +8,12 @@ import pytest
 from synthetic_data_ai.application.ddl_parser import DDLParser
 from synthetic_data_ai.config import Settings
 from synthetic_data_ai.domain.generation import ColumnRule, GenerationPlan, RuleKind
-from synthetic_data_ai.infrastructure.gemini import GeminiPlanningError, VertexGenerationPlanner
+from synthetic_data_ai.domain.query import QueryOperation, QueryPlan
+from synthetic_data_ai.infrastructure.gemini import (
+    GeminiPlanningError,
+    VertexGenerationPlanner,
+    VertexQueryPlanner,
+)
 
 DDL = """
 CREATE TABLE departments (id INTEGER PRIMARY KEY, name VARCHAR(80) NOT NULL);
@@ -77,3 +82,22 @@ def test_planner_rejects_key_column_overrides() -> None:
 
     with pytest.raises(GeminiPlanningError, match="key column"):
         planner.create_plan(schema, "Break the foreign key", default_rows=10, seed=42)
+
+
+def test_query_planner_returns_structured_plan_without_sql() -> None:
+    schema = DDLParser().parse(DDL)
+    expected = QueryPlan(
+        table="employees",
+        operation=QueryOperation.GROUP_AVERAGE,
+        metric_column="salary",
+        group_by_column="country",
+        explanation="Compare salaries by country",
+    )
+    client = FakeClient(expected)
+    planner = VertexQueryPlanner(Settings(_env_file=None), client=client)
+
+    actual = planner.create_plan(schema, "Average salary by country")
+
+    assert actual == expected
+    assert client.models.last_request is not None
+    assert "Never return SQL" in client.models.last_request["contents"]

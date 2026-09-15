@@ -26,6 +26,7 @@ from sqlalchemy import (
 from sqlalchemy.sql.type_api import TypeEngine
 
 from synthetic_data_ai.domain.generation import GeneratedDataset
+from synthetic_data_ai.domain.query import QueryOperation, QueryPlan, QueryResult
 from synthetic_data_ai.domain.schema import (
     ColumnDefinition,
     DataCategory,
@@ -95,6 +96,52 @@ class RelationalStore:
         with self._engine.connect() as connection:
             rows = connection.execute(select(table).limit(safe_limit)).mappings()
             return tuple(dict(row) for row in rows)
+
+    def execute_query(self, plan: QueryPlan) -> QueryResult:
+        """Translate an allowlisted QueryPlan into SQLAlchemy expressions."""
+
+        table = self._tables.get(plan.table)
+        if table is None:
+            raise KeyError(f"Unknown managed table {plan.table}")
+        if plan.operation is QueryOperation.PREVIEW:
+            return QueryResult(plan=plan, rows=self.preview(plan.table, plan.limit))
+
+        metric = table.c[plan.metric_column] if plan.metric_column else None
+        group = table.c[plan.group_by_column] if plan.group_by_column else None
+        if plan.operation is QueryOperation.COUNT:
+            statement = select(func.count().label("value")).select_from(table)
+        elif plan.operation is QueryOperation.AVERAGE and metric is not None:
+            statement = select(func.avg(metric).label("value"))
+        elif plan.operation is QueryOperation.SUM and metric is not None:
+            statement = select(func.sum(metric).label("value"))
+        elif plan.operation is QueryOperation.MINIMUM and metric is not None:
+            statement = select(func.min(metric).label("value"))
+        elif plan.operation is QueryOperation.MAXIMUM and metric is not None:
+            statement = select(func.max(metric).label("value"))
+        elif plan.operation is QueryOperation.GROUP_COUNT and group is not None:
+            statement = (
+                select(group.label("group"), func.count().label("value"))
+                .group_by(group)
+                .order_by(func.count().desc())
+                .limit(plan.limit)
+            )
+        elif (
+            plan.operation is QueryOperation.GROUP_AVERAGE
+            and group is not None
+            and metric is not None
+        ):
+            statement = (
+                select(group.label("group"), func.avg(metric).label("value"))
+                .group_by(group)
+                .order_by(func.avg(metric).desc())
+                .limit(plan.limit)
+            )
+        else:
+            raise ValueError(f"Incomplete query plan for {plan.operation}")
+
+        with self._engine.connect() as connection:
+            rows = connection.execute(statement).mappings()
+            return QueryResult(plan=plan, rows=tuple(dict(row) for row in rows))
 
     def _build_tables(self, schema: RelationalSchema) -> Mapping[str, Table]:
         tables: dict[str, Table] = {}
