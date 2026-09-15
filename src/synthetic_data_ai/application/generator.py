@@ -10,9 +10,11 @@ from uuid import NAMESPACE_URL, uuid5
 from faker import Faker
 
 from synthetic_data_ai.domain.generation import (
+    ColumnRule,
     GeneratedDataset,
     GeneratedTable,
     GenerationPlan,
+    RuleKind,
 )
 from synthetic_data_ai.domain.schema import ColumnDefinition, DataCategory, RelationalSchema
 
@@ -57,11 +59,12 @@ class RelationalDataGenerator:
                             raise GenerationError(f"No parent rows for {table_name}.{column.name}")
                         value = randomizer.choice(parent_rows)[foreign_key.referenced_column]
                     else:
-                        value = self._value_for(
+                        value = self._value_for_rule(
                             table_name=table_name,
                             column=column,
                             row_index=row_index,
                             plan=plan,
+                            rule=plan.rule_for(table_name, column.name),
                             randomizer=randomizer,
                             faker=faker,
                         )
@@ -90,6 +93,52 @@ class RelationalDataGenerator:
         invalid = sorted(name for name, count in plan.table_rows.items() if count < 1)
         if invalid:
             raise GenerationError(f"Row counts must be positive: {', '.join(invalid)}")
+
+        for table_name, column_rules in plan.column_rules.items():
+            if table_name not in known_tables:
+                raise GenerationError(f"Column rules reference unknown table: {table_name}")
+            table = schema.table(table_name)
+            foreign_key_columns = {key.local_column for key in table.foreign_keys}
+            for column_name in column_rules:
+                try:
+                    column = table.column(column_name)
+                except KeyError as error:
+                    raise GenerationError(str(error)) from error
+                if column.primary_key or column_name in foreign_key_columns:
+                    raise GenerationError(
+                        f"Rules cannot override key column {table_name}.{column_name}"
+                    )
+
+    def _value_for_rule(
+        self,
+        *,
+        table_name: str,
+        column: ColumnDefinition,
+        row_index: int,
+        plan: GenerationPlan,
+        rule: ColumnRule,
+        randomizer: random.Random,
+        faker: Faker,
+    ) -> object:
+        if rule.kind is RuleKind.CHOICE:
+            return randomizer.choice(rule.choices)
+        if rule.kind is RuleKind.CONSTANT:
+            return rule.value
+        if rule.kind is RuleKind.INTEGER_RANGE:
+            return randomizer.randint(int(rule.minimum or 0), int(rule.maximum or 0))
+        if rule.kind is RuleKind.DECIMAL_RANGE:
+            scale = column.scale if column.scale is not None else 2
+            return Decimal(
+                str(round(randomizer.uniform(rule.minimum or 0, rule.maximum or 0), scale))
+            )
+        return self._value_for(
+            table_name=table_name,
+            column=column,
+            row_index=row_index,
+            plan=plan,
+            randomizer=randomizer,
+            faker=faker,
+        )
 
     def _value_for(
         self,
